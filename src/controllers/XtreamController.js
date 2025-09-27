@@ -200,45 +200,209 @@ class XtreamController {
     /**
      * API de autenticação alternativa (compatível com UniTV)
      */
-     async handleAlternativeAPI(req, res) {
+    async handleAlternativeAPI(req, res) {
         const { action } = req.query;
-        const user = req.user; // Vem do middleware de autenticação
         
-        logger.info(`🔐 Alternative API Request: ${action || 'unknown'} - User: ${user?.username || 'N/A'}`);
+        logger.info(`🔐 Alternative API Request: ${action || 'unknown'} - IP: ${req.ip}`);
         
         switch (action) {
             case 'auth':
-                // Verificar se já existe sessão ativa para o usuário
-                if (!global.userSessions) global.userSessions = new Map();
+                return await this.handleUniTVAuth(req, res);
                 
-                let sessionToken;
-                let sessionInfo = global.userSessions.get(user.username);
-                
-                // Se já existe sessão válida, reutilizar
-                if (sessionInfo && sessionInfo.expires > Date.now()) {
-                    sessionToken = sessionInfo.token;
-                    logger.info(`Reutilizando sessão existente para usuário: ${user.username}`);
-                } else {
-                    // Criar nova sessão
-                    sessionToken = `session_${user.id}_${Date.now().toString(36)}`;
-                    global.userSessions.set(user.username, {
-                        token: sessionToken,
-                        userId: user.id,
-                        expires: Date.now() + (24 * 60 * 60 * 1000) // 24 horas
+            default:
+                // Para outras ações, usar autenticação normal e redirecionar
+                try {
+                    await AuthMiddleware.authenticateUser(req, res, () => {
+                        const queryString = new URLSearchParams(req.query).toString();
+                        res.redirect(302, `/player_api.php?${queryString}`);
                     });
-                    logger.info(`Nova sessão criada para usuário: ${user.username}`);
+                } catch (error) {
+                    res.status(401).json({
+                        error: 'Authentication required',
+                        message: 'Invalid credentials'
+                    });
                 }
+                break;
+        }
+    }
+
+    /**
+     * Autenticação específica para UniTV
+     */
+    async handleUniTVAuth(req, res) {
+        try {
+            let { username, password, e, t } = req.query;
+            
+            // Se há dados criptografados (parâmetro 'e'), descriptografar primeiro
+            if (e && t) {
+                logger.info(`UniTV: Dados criptografados recebidos (t=${t})`);
                 
-                // Formato exato esperado pelo UniTV
-                const authResponse = {
-                    server: `http://${req.get('host')}`,
-                    username: user.username,
-                    password: sessionToken,
-                    success: true,
-                    validity_days: Math.floor((new Date(user.expires_at) - new Date()) / (1000 * 60 * 60 * 24)),
-                    ua: 'UniTV/4.14.4',
-                    message: 'Authentication successful'
-                };
+                // URL decode dos dados
+                const urlDecoded = decodeURIComponent(e);
+                
+                // Descriptografar usando a chave do UniTV
+                const AuthMiddleware = require('../middleware/auth');
+                const decryptedData = AuthMiddleware.decryptOpenSSLFormat(urlDecoded, AuthMiddleware.ENCRYPTION_KEY);
+                
+                if (decryptedData) {
+                    const credentials = AuthMiddleware.parseDecryptedData(decryptedData);
+                    
+                    if (credentials) {
+                        username = credentials.username;
+                        password = credentials.password;
+                        logger.info(`UniTV: Dados descriptografados - User: ${username}`);
+                    } else {
+                        logger.warn(`UniTV: Falha ao extrair credenciais: ${decryptedData}`);
+                        return res.status(401).json({
+                            success: false,
+                            message: 'Invalid encrypted data format'
+                        });
+                    }
+                } else {
+                    logger.warn(`UniTV: Falha na descriptografia: ${urlDecoded.substring(0, 50)}...`);
+                    return res.status(401).json({
+                        success: false,
+                        message: 'Failed to decrypt authentication data'
+                    });
+                }
+            }
+
+            if (!username || !password) {
+                return res.status(401).json({
+                    success: false,
+                    message: 'Username and password are required'
+                });
+            }
+
+            // Buscar usuário no banco
+            const User = require('../models/User');
+            const user = await User.findByUsername(username);
+            
+            if (!user) {
+                logger.warn(`UniTV: Usuário não encontrado: ${username}`);
+                return res.status(401).json({
+                    success: false,
+                    message: 'Invalid credentials'
+                });
+            }
+
+            // Verificar senha
+            const isValidPassword = await user.verifyPassword(password);
+            
+            // Verificar também se é um token temporário válido
+            let isValidAuth = isValidPassword;
+            if (!isValidAuth && global.tempTokens && global.tempTokens.has(username)) {
+                const tempToken = global.tempTokens.get(username);
+                isValidAuth = (password === tempToken);
+                
+                if (isValidAuth) {
+                    logger.info(`UniTV: Autenticação via token temporário: ${username}`);
+                }
+            }
+            
+            if (!isValidAuth) {
+                logger.warn(`UniTV: Senha incorreta para usuário: ${username}`);
+                return res.status(401).json({
+                    success: false,
+                    message: 'Invalid credentials'
+                });
+            }
+
+            if (!user.isValid()) {
+                logger.warn(`UniTV: Usuário inválido: ${username} (Status: ${user.status})`);
+                return res.status(403).json({
+                    success: false,
+                    message: user.status === 'expired' ? 'Account expired' : 'Account suspended'
+                });
+            }
+
+            // Atualizar último login
+            await user.updateLastLogin();
+
+            // Gerenciar sessões globais
+            if (!global.userSessions) global.userSessions = new Map();
+            
+            let sessionToken;
+            let sessionInfo = global.userSessions.get(user.username);
+            
+            // Se já existe sessão válida, reutilizar
+            if (sessionInfo && sessionInfo.expires > Date.now()) {
+                sessionToken = sessionInfo.token;
+                logger.info(`UniTV: Reutilizando sessão existente: ${user.username}`);
+            } else {
+                // Criar nova sessão
+                sessionToken = `session_${user.id}_${Date.now().toString(36)}`;
+                global.userSessions.set(user.username, {
+                    token: sessionToken,
+                    userId: user.id,
+                    expires: Date.now() + (24 * 60 * 60 * 1000) // 24 horas
+                });
+                logger.info(`UniTV: Nova sessão criada: ${user.username}`);
+            }
+            
+            // Calcular dias de validade
+            const validityDays = Math.max(0, Math.floor((new Date(user.expires_at) - new Date()) / (1000 * 60 * 60 * 24)));
+            
+            // Resposta no formato exato esperado pelo UniTV
+            const authResponse = {
+                server: `http://${req.get('host')}`,
+                username: user.username,
+                password: sessionToken,
+                success: true,
+                validity_days: validityDays,
+                ua: 'UniTV/4.14.4',
+                message: 'Authentication successful'
+            };
+            
+            logger.info(`UniTV: Autenticação bem-sucedida - User: ${user.username}, Validade: ${validityDays} dias`);
+            res.json(authResponse);
+
+        } catch (error) {
+            logger.error(`UniTV: Erro na autenticação: ${error.message}`);
+            res.status(500).json({
+                success: false,
+                message: 'Internal server error'
+            });
+        }
+    }
+
+    /**
+     * Middleware para autenticar via sessão do UniTV
+     */
+    static async authenticateUniTVSession(req, res, next) {
+        try {
+            const { username, password } = req.params;
+
+            if (!username || !password) {
+                return res.status(401).send('Credentials required');
+            }
+
+            // Verificar se é uma sessão válida do UniTV
+            if (global.userSessions && global.userSessions.has(username)) {
+                const sessionInfo = global.userSessions.get(username);
+                
+                if (sessionInfo.token === password && sessionInfo.expires > Date.now()) {
+                    // Buscar usuário
+                    const User = require('../models/User');
+                    const user = await User.findById(sessionInfo.userId);
+                    
+                    if (user && user.isValid()) {
+                        req.user = user;
+                        return next();
+                    }
+                }
+            }
+
+            // Fallback para autenticação normal
+            req.query = { username, password };
+            const AuthMiddleware = require('../middleware/auth');
+            await AuthMiddleware.authenticateUser(req, res, next);
+
+        } catch (error) {
+            logger.error(`Erro na autenticação de sessão UniTV: ${error.message}`);
+            res.status(401).send('Authentication failed');
+        }
+    }
                 
                 logger.info(`Autenticacao aceita para UniTV - User: ${user.username}`);
                 res.json(authResponse);

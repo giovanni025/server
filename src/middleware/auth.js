@@ -90,30 +90,30 @@ class AuthMiddleware {
 
             // Se há dados criptografados (parâmetro 'e'), descriptografar primeiro
             if (e && t) {
-                logger.info(`Tentativa de autenticação com dados criptografados (t=${t})`);
+                logger.info(`Auth: Dados criptografados recebidos (t=${t})`);
                 
                 // URL decode dos dados
                 const urlDecoded = decodeURIComponent(e);
                 
                 // Descriptografar usando a chave do UniTV
-                const decryptedData = AuthMiddleware.decryptOpenSSLFormat(urlDecoded, AuthMiddleware.ENCRYPTION_KEY);
+                const decryptedData = this.decryptOpenSSLFormat(urlDecoded, this.ENCRYPTION_KEY);
                 
                 if (decryptedData) {
-                    const credentials = AuthMiddleware.parseDecryptedData(decryptedData);
+                    const credentials = this.parseDecryptedData(decryptedData);
                     
                     if (credentials) {
                         username = credentials.username;
                         password = credentials.password;
-                        logger.info(`Dados descriptografados com sucesso - User: ${username}`);
+                        logger.info(`Auth: Dados descriptografados - User: ${username}`);
                     } else {
-                        logger.warn(`Falha ao extrair credenciais dos dados descriptografados: ${decryptedData}`);
+                        logger.warn(`Auth: Falha ao extrair credenciais: ${decryptedData}`);
                         return res.status(401).json({
                             error: 'Dados de autenticação inválidos',
                             message: 'Formato de credenciais não reconhecido'
                         });
                     }
                 } else {
-                    logger.warn(`Falha na descriptografia dos dados: ${urlDecoded.substring(0, 50)}...`);
+                    logger.warn(`Auth: Falha na descriptografia: ${urlDecoded.substring(0, 50)}...`);
                     return res.status(401).json({
                         error: 'Falha na descriptografia',
                         message: 'Não foi possível descriptografar os dados de autenticação'
@@ -131,7 +131,7 @@ class AuthMiddleware {
             const user = await User.findByUsername(username);
             
             if (!user) {
-                logger.warn(`Tentativa de login com usuário inexistente: ${username}`);
+                logger.warn(`Auth: Usuário não encontrado: ${username}`);
                 return res.status(401).json({
                     error: 'Credenciais inválidas',
                     message: 'Usuário ou senha incorretos'
@@ -147,12 +147,12 @@ class AuthMiddleware {
                 isValidAuth = (password === tempToken);
                 
                 if (isValidAuth) {
-                    logger.info(`Autenticação via token temporário para usuário: ${username}`);
+                    logger.info(`Auth: Token temporário válido: ${username}`);
                 }
             }
             
             if (!isValidAuth) {
-                logger.warn(`Senha incorreta para usuário: ${username}`);
+                logger.warn(`Auth: Senha incorreta: ${username}`);
                 return res.status(401).json({
                     error: 'Credenciais inválidas',
                     message: 'Usuário ou senha incorretos'
@@ -160,7 +160,7 @@ class AuthMiddleware {
             }
 
             if (!user.isValid()) {
-                logger.warn(`Tentativa de login com usuário inválido: ${username} (Status: ${user.status})`);
+                logger.warn(`Auth: Usuário inválido: ${username} (Status: ${user.status})`);
                 return res.status(403).json({
                     error: 'Usuário inválido',
                     message: user.status === 'expired' ? 'Usuário expirado' : 'Usuário suspenso'
@@ -175,7 +175,7 @@ class AuthMiddleware {
             next();
 
         } catch (error) {
-            logger.error(`Erro na autenticação: ${error.message}`);
+            logger.error(`Auth: Erro na autenticação: ${error.message}`);
             res.status(500).json({
                 error: 'Erro interno',
                 message: 'Erro no processo de autenticação'

@@ -17,6 +17,7 @@ const AuthMiddleware = require('./middleware/auth');
 const adminRoutes = require('./routes/admin');
 const xtreamRoutes = require('./routes/xtream');
 const logger = require('./utils/logger');
+const sessionManager = require('./utils/sessionManager');
 
 class XtreamRedistributor {
     constructor() {
